@@ -1,0 +1,24 @@
+# Local environment files and deployment credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Firmware credentials
+firmware/RemoteFeeder/secrets.h
+firmware/RemoteFeeder/secrets.*.h
+!firmware/RemoteFeeder/secrets.example.h
+
+# Firebase / Google service credentials
+service-account*.json
+firebase-adminsdk*.json
+*-firebase-adminsdk-*.json
+*.pem
+*.p12
+
+# Generated dependencies and build output
+**/node_modules/
+**/.next/
+**/build/
+**/out/
+**/.vercel/

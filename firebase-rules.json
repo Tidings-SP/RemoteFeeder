@@ -1,0 +1,30 @@
+{
+  "rules": {
+    "feeder": {
+      ".read": true,
+      ".write": true,
+      "trigger": {
+        ".validate": "newData.isBoolean()"
+      },
+      "lastFedAt": {
+        ".validate": "newData.isNumber()"
+      },
+      "lastFedSource": {
+        ".validate": "newData.isString() && (newData.val() === 'manual' || newData.val() === 'auto')"
+      },
+      "status": {
+        ".validate": "newData.isString() && (newData.val() === 'idle' || newData.val() === 'feeding' || newData.val() === 'offline')"
+      },
+      "espOnline": {
+        ".validate": "newData.isBoolean()"
+      },
+      "wifiRSSI": {
+        ".validate": "newData.isNumber()"
+      },
+      "lastSeen": {
+        ".validate": "newData.isNumber()"
+      }
+    }
+  }
+}
+
