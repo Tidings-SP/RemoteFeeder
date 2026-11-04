@@ -23,6 +23,24 @@
       },
       "lastSeen": {
         ".validate": "newData.isNumber()"
+      },
+      "lastBootAt": {
+        ".validate": "newData.isNumber()"
+      },
+      "lastBootReason": {
+        ".validate": "newData.isString()"
+      },
+      "lastPowerCutAt": {
+        ".validate": "newData.isNumber()"
+      },
+      "lastPowerCutReason": {
+        ".validate": "newData.isString()"
+      },
+      "lastWifiIssueAt": {
+        ".validate": "newData.isNumber()"
+      },
+      "lastWifiIssueReason": {
+        ".validate": "newData.isString()"
       }
     }
   }

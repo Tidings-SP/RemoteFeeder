@@ -6,5 +6,11 @@ export interface FeederState {
   espOnline: boolean;
   wifiRSSI: number | null;
   lastSeen: number | null;       // Unix ms heartbeat from ESP
+  lastBootAt: number | null;     // Unix ms of most recent ESP boot
+  lastBootReason: string | null;
+  lastPowerCutAt: number | null; // Latest power-on or brownout reset
+  lastPowerCutReason: string | null;
+  lastWifiIssueAt: number | null;
+  lastWifiIssueReason: string | null;
 }
 

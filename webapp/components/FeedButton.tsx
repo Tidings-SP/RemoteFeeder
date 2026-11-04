@@ -48,13 +48,13 @@ export default function FeedButton({ onFeed, feeding, status, espOnline, loading
           : isFeeding
           ? "Feeding fish… 🌊"
           : !espOnline
-          ? "ESP32 offline – trigger queued"
+          ? "ESP32 offline – feeding unavailable"
           : "Tap to feed now"}
       </p>
       {!espOnline && !loading && (
         <p className="text-xs text-yellow-500 max-w-xs text-center">
-          ⚠️ ESP32 is offline (sleep window or no network). The trigger will
-          fire automatically when it reconnects.
+          ⚠️ ESP32 is offline (sleep window or no network). Feeding will be
+          available when it reconnects.
         </p>
       )}
     </div>

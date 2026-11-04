@@ -6,6 +6,7 @@ import FeedButton from "@/components/FeedButton";
 import InfoCard from "@/components/InfoCard";
 import WifiStrength from "@/components/WifiStrength";
 import MotorPattern from "@/components/MotorPattern";
+import AdvancedDetails from "@/components/AdvancedDetails";
 
 export default function Home() {
   const { state, loading, feeding, triggerFeed } = useFeeder();
@@ -68,13 +69,15 @@ export default function Home() {
         <InfoCard
           icon="🌙"
           label="WiFi Sleep Window"
-          value="20:00 – 08:00 IST"
-          sub="Radio off to reduce heat"
+          value="20:00 – 08:00 & 12:00 – 16:30 IST"
+          sub="Radio off to reduce heat and power use"
         />
       </div>
 
       {/* Motor Pattern Visualiser */}
       <MotorPattern active={state.status === "feeding"} />
+
+      <AdvancedDetails state={state} />
 
       {/* Footer */}
       <p className="text-xs text-gray-600 mt-4">

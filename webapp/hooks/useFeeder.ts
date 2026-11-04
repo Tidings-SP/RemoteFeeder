@@ -17,6 +17,12 @@ export function useFeeder() {
     espOnline: false,
     wifiRSSI: null,
     lastSeen: null,
+    lastBootAt: null,
+    lastBootReason: null,
+    lastPowerCutAt: null,
+    lastPowerCutReason: null,
+    lastWifiIssueAt: null,
+    lastWifiIssueReason: null,
   });
   const [loading, setLoading] = useState(true);
   const [feeding, setFeeding] = useState(false);
@@ -35,31 +41,46 @@ export function useFeeder() {
 
   useEffect(() => {
     const feederRef = ref(db, FEEDER_PATH);
-    const unsub = onValue(feederRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.val();
-        setRawState({
-          trigger: data.trigger ?? false,
-          lastFedAt: data.lastFedAt ?? null,
-          lastFedSource: data.lastFedSource ?? null,
-          status: data.status ?? "offline",
-          espOnline: data.espOnline ?? false,
-          wifiRSSI: data.wifiRSSI ?? null,
-          lastSeen: data.lastSeen ?? null,
-        });
+    const unsub = onValue(
+      feederRef,
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.val();
+          setRawState({
+            trigger: data.trigger ?? false,
+            lastFedAt: data.lastFedAt ?? null,
+            lastFedSource: data.lastFedSource ?? null,
+            status: data.status ?? "offline",
+            espOnline: data.espOnline ?? false,
+            wifiRSSI: data.wifiRSSI ?? null,
+            lastSeen: data.lastSeen ?? null,
+            lastBootAt: data.lastBootAt ?? null,
+            lastBootReason: data.lastBootReason ?? null,
+            lastPowerCutAt: data.lastPowerCutAt ?? null,
+            lastPowerCutReason: data.lastPowerCutReason ?? null,
+            lastWifiIssueAt: data.lastWifiIssueAt ?? null,
+            lastWifiIssueReason: data.lastWifiIssueReason ?? null,
+          });
 
-        // Reset the offline-synced flag when ESP comes back online
-        if (data.espOnline) {
-          offlineSyncedRef.current = false;
-        }
+          // Reset the offline-synced flag when ESP comes back online
+          if (data.espOnline) {
+            offlineSyncedRef.current = false;
+          }
 
-        // Clear local feeding state once ESP confirms idle
-        if (data.status === "idle" || data.status === "offline") {
-          setFeeding(false);
+          // Clear local feeding state once ESP confirms idle
+          if (data.status === "idle" || data.status === "offline") {
+            setFeeding(false);
+          }
         }
-      }
-      setLoading(false);
-    });
+        setLoading(false);
+      },
+      () => {
+        // Permission and listener errors otherwise leave the UI on
+        // "Connecting…" forever. The default state safely renders offline.
+        setFeeding(false);
+        setLoading(false);
+      },
+    );
 
     return () => unsub();
   }, []);

@@ -41,6 +41,7 @@
 #include <WiFi.h>
 #include <time.h>
 #include <Preferences.h>              // NVS for persistent storage
+#include <esp_system.h>               // reset-reason diagnostics
 
 // ---- Firebase ESP32 Client ----
 // Install: "Firebase ESP32 Client" by Mobizt (Library Manager)
@@ -72,19 +73,33 @@ const int   DAYLIGHT_SEC   = 0;
 const int AUTO_FEED_HOUR   = 9;   // 09:00 IST
 const int AUTO_FEED_MIN    = 0;
 
-// --- WiFi sleep window: 20:00 – 08:00 IST (radio OFF) ---
-const int WIFI_OFF_HOUR_START = 20;
-const int WIFI_OFF_HOUR_END   = 8;
+// --- WiFi sleep windows (IST, radio OFF) ---
+// Edit only these entries while testing. A window can cross midnight, such as
+// 20:00 → 08:00. The end time is exclusive, so 16:30 means WiFi wakes at 16:30.
+struct WifiSleepWindow {
+  uint8_t startHour;
+  uint8_t startMinute;
+  uint8_t endHour;
+  uint8_t endMinute;
+};
+
+const WifiSleepWindow WIFI_SLEEP_WINDOWS[] = {
+  {20, 0,  8,  0},  // Night: 20:00 – 08:00
+  {12, 0, 16, 30},  // Midday: 12:00 – 16:30
+};
+const size_t WIFI_SLEEP_WINDOW_COUNT =
+  sizeof(WIFI_SLEEP_WINDOWS) / sizeof(WIFI_SLEEP_WINDOWS[0]);
 
 // --- Motor pattern ---
 const int FEED_CYCLES       = 3;
-const int MOTOR_ON_MS       = 1500;
-const int MOTOR_OFF_MS      = 500;
+const int MOTOR_ON_MS       = 500;
+const int MOTOR_OFF_MS      = 300;
 
 // --- Timing intervals (ms) ---
 const unsigned long FIREBASE_POLL_MS  = 2000;    // how often we check trigger
 const unsigned long HEARTBEAT_MS      = 10000;   // online status heartbeat
 const unsigned long WIFI_CHECK_MS     = 30000;   // reconnect check
+const unsigned long NTP_RETRY_MS      = 300000;  // retry time sync every 5 min if needed
 
 // ============================================================
 //  Globals
@@ -103,6 +118,13 @@ bool    wifiSleepMode   = false;    // true when radio is intentionally off
 unsigned long lastFirebasePoll  = 0;
 unsigned long lastHeartbeat     = 0;
 unsigned long lastWifiCheck     = 0;
+unsigned long lastTimeSyncAttempt = 0;
+
+esp_reset_reason_t bootResetReason;
+bool bootMetadataSynced = false;
+bool wifiIssueOngoing   = false;
+bool wifiIssuePending   = false;
+String pendingWifiIssueReason;
 
 // NVS keys
 const char* NVS_NS           = "feeder";
@@ -124,6 +146,12 @@ void  checkManualTrigger();
 void  updateHeartbeat();
 void  manageWifiSleep();
 bool  isWifiSleepTime();
+bool  isWithinWifiSleepWindow(int currentMinutes, const WifiSleepWindow& window);
+const char* resetReasonName(esp_reset_reason_t reason);
+bool  isPowerRelatedReset(esp_reset_reason_t reason);
+void  syncBootMetadata();
+void  recordWifiIssue(const char* reason);
+void  syncPendingWifiIssue();
 void  blinkLED(int times, int onMs, int offMs);
 time_t getNowTimestamp();
 String todayString();
@@ -134,13 +162,15 @@ String todayString();
 void setup() {
   Serial.begin(115200);
   delay(500);
+  bootResetReason = esp_reset_reason();
   Serial.println("\n[RemoteFeeder] Booting...");
+  Serial.printf("[System] Reset reason: %s\n", resetReasonName(bootResetReason));
 
   // --- Pin setup ---
   pinMode(PIN_MOTOR, OUTPUT);
   digitalWrite(PIN_MOTOR, LOW);
   pinMode(PIN_LED, OUTPUT);
-  digitalWrite(PIN_LED, LOW);
+  rgbLedWrite(PIN_LED, 0,0,0);
 
   // --- NVS ---
   prefs.begin(NVS_NS, false);
@@ -182,12 +212,24 @@ void loop() {
     lastWifiCheck = now;
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("[WiFi] Reconnecting...");
+      recordWifiIssue("WiFi connection lost");
       wifiConnected = false;
       firebaseReady = false;   // Connection is dead – must re-init
       connectWiFi();
       if (wifiConnected && !timeSync) syncTime();
       if (wifiConnected) initFirebase();
     }
+  }
+
+  // Retry NTP after a transient startup failure even if WiFi stays connected.
+  // Without a valid clock, scheduled feeding and the WiFi sleep window cannot run.
+  if (
+    wifiConnected &&
+    !wifiSleepMode &&
+    !timeSync &&
+    now - lastTimeSyncAttempt >= NTP_RETRY_MS
+  ) {
+    syncTime();
   }
 
   // 3. Firebase: poll manual trigger
@@ -232,9 +274,11 @@ void connectWiFi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
+    wifiIssueOngoing = false;
     Serial.println("\n[WiFi] Connected: " + WiFi.localIP().toString());
   } else {
     wifiConnected = false;
+    recordWifiIssue("WiFi connection attempt failed");
     Serial.println("\n[WiFi] Failed – offline mode active.");
   }
 }
@@ -243,6 +287,7 @@ void connectWiFi() {
 //  NTP time sync
 // ============================================================
 void syncTime() {
+  lastTimeSyncAttempt = millis();
   configTime(TZ_OFFSET_SEC, DAYLIGHT_SEC, "pool.ntp.org", "time.google.com");
   Serial.print("[NTP] Syncing");
 
@@ -257,6 +302,8 @@ void syncTime() {
   if (getLocalTime(&ti)) {
     timeSync = true;
     Serial.println("\n[NTP] Synced: " + String(asctime(&ti)));
+    syncBootMetadata();
+    syncPendingWifiIssue();
   } else {
     timeSync = false;
     Serial.println("\n[NTP] Sync failed.");
@@ -289,6 +336,9 @@ void initFirebase() {
   }
   Firebase.updateNode(fbData, "/feeder", json);
 
+  syncBootMetadata();
+  syncPendingWifiIssue();
+
   Serial.println("[Firebase] Initialized.");
 }
 
@@ -302,8 +352,14 @@ void runFeedCycle(const char* source) {
     Firebase.setString(fbData, "/feeder/status", "feeding");
   }
 
+  // Persist this before applying motor power. A brownout during a cycle can
+  // reboot the ESP32; recording first prevents missed-feed recovery from
+  // starting the motor again in a reboot loop. This intentionally favors
+  // at-most-once feeding over a possible duplicate feed.
+  markFedToday();
+
   // Visual indicator: LED on during feeding
-  digitalWrite(PIN_LED, HIGH);
+  rgbLedWrite(PIN_LED, 2, 8, 6);
 
   for (int i = 0; i < FEED_CYCLES; i++) {
     Serial.printf("[Feeder] Cycle %d/%d – motor ON\n", i + 1, FEED_CYCLES);
@@ -315,11 +371,10 @@ void runFeedCycle(const char* source) {
     if (i < FEED_CYCLES - 1) delay(MOTOR_OFF_MS);  // no pause after last cycle
   }
 
-  digitalWrite(PIN_LED, LOW);
+  rgbLedWrite(PIN_LED, 0,0,0);
 
   // Update records
   updateFeedRecord(source);
-  markFedToday();
 
   if (firebaseReady) {
     Firebase.setString(fbData, "/feeder/status", "idle");
@@ -410,8 +465,16 @@ void checkManualTrigger() {
   if (fbData.boolData()) {
     Serial.println("[Firebase] Manual trigger received!");
 
-    // Reset trigger FIRST to avoid double-fire
-    Firebase.setBool(fbData, "/feeder/trigger", false);
+    // Reset trigger FIRST to avoid double-fire. If the acknowledgement fails,
+    // do not run the motor: retrying a still-true trigger is safer than a
+    // possible duplicate feed after an uncertain write.
+    if (!Firebase.setBool(fbData, "/feeder/trigger", false)) {
+      Serial.printf(
+        "[Firebase] Could not clear manual trigger: %s\n",
+        fbData.errorReason().c_str()
+      );
+      return;
+    }
 
     // Run feed – mark as "manual" so auto-feed is also suppressed today
     runFeedCycle("manual");
@@ -441,12 +504,32 @@ void updateHeartbeat() {
 // ============================================================
 
 bool isWifiSleepTime() {
+  // On boot the ESP may retain a valid-looking UTC clock from before NTP sets
+  // the IST offset. Never apply a sleep window until this run has synced time.
+  if (!timeSync) return false;
+
   struct tm ti;
   if (!getLocalTime(&ti)) return false;
 
-  int h = ti.tm_hour;
-  // Sleep window: 20:00–23:59  AND  00:00–07:59
-  return (h >= WIFI_OFF_HOUR_START || h < WIFI_OFF_HOUR_END);
+  int currentMinutes = ti.tm_hour * 60 + ti.tm_min;
+  for (size_t i = 0; i < WIFI_SLEEP_WINDOW_COUNT; i++) {
+    if (isWithinWifiSleepWindow(currentMinutes, WIFI_SLEEP_WINDOWS[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isWithinWifiSleepWindow(int currentMinutes, const WifiSleepWindow& window) {
+  int startMinutes = window.startHour * 60 + window.startMinute;
+  int endMinutes = window.endHour * 60 + window.endMinute;
+
+  // Equal start/end would otherwise mean an accidental all-day sleep window.
+  if (startMinutes == endMinutes) return false;
+  if (startMinutes < endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  }
+  return currentMinutes >= startMinutes || currentMinutes < endMinutes;
 }
 
 void manageWifiSleep() {
@@ -488,6 +571,68 @@ void manageWifiSleep() {
 //  Helpers
 // ============================================================
 
+const char* resetReasonName(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:  return "Power-on reset";
+    case ESP_RST_EXT:      return "External reset";
+    case ESP_RST_SW:       return "Software reset";
+    case ESP_RST_PANIC:    return "Panic reset";
+    case ESP_RST_INT_WDT:  return "Interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "Task watchdog";
+    case ESP_RST_WDT:      return "Other watchdog";
+    case ESP_RST_DEEPSLEEP:return "Deep-sleep wake";
+    case ESP_RST_BROWNOUT: return "Brownout";
+    case ESP_RST_SDIO:     return "SDIO reset";
+    default:               return "Unknown reset";
+  }
+}
+
+bool isPowerRelatedReset(esp_reset_reason_t reason) {
+  return reason == ESP_RST_POWERON || reason == ESP_RST_BROWNOUT;
+}
+
+void syncBootMetadata() {
+  if (!firebaseReady || bootMetadataSynced) return;
+
+  time_t now = getNowTimestamp();
+  if (now <= 100000) return;
+
+  FirebaseJson json;
+  json.set("lastBootAt", (double)now * 1000.0);
+  json.set("lastBootReason", resetReasonName(bootResetReason));
+  if (isPowerRelatedReset(bootResetReason)) {
+    // A power-on/brownout reset is the closest reliable on-device signal for
+    // a power interruption. Other reset causes keep the previous power event.
+    json.set("lastPowerCutAt", (double)now * 1000.0);
+    json.set("lastPowerCutReason", resetReasonName(bootResetReason));
+  }
+
+  bootMetadataSynced = Firebase.updateNode(fbData, "/feeder", json);
+}
+
+void recordWifiIssue(const char* reason) {
+  if (wifiIssueOngoing) return;
+
+  wifiIssueOngoing = true;
+  wifiIssuePending = true;
+  pendingWifiIssueReason = reason;
+  syncPendingWifiIssue();
+}
+
+void syncPendingWifiIssue() {
+  if (!firebaseReady || !wifiIssuePending) return;
+
+  time_t now = getNowTimestamp();
+  if (now <= 100000) return;
+
+  FirebaseJson json;
+  json.set("lastWifiIssueAt", (double)now * 1000.0);
+  json.set("lastWifiIssueReason", pendingWifiIssueReason);
+  if (Firebase.updateNode(fbData, "/feeder", json)) {
+    wifiIssuePending = false;
+  }
+}
+
 // NOTE: Named getNowTimestamp() to avoid collision with the
 // ESP32 SDK's getLocalTime(struct tm*) which takes a pointer.
 time_t getNowTimestamp() {
@@ -498,9 +643,9 @@ time_t getNowTimestamp() {
 
 void blinkLED(int times, int onMs, int offMs) {
   for (int i = 0; i < times; i++) {
-    digitalWrite(PIN_LED, HIGH);
+    rgbLedWrite(PIN_LED, 2, 8, 6);
     delay(onMs);
-    digitalWrite(PIN_LED, LOW);
+    rgbLedWrite(PIN_LED, 0, 0, 0);
     if (i < times - 1) delay(offMs);
   }
 }
