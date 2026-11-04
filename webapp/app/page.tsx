@@ -9,7 +9,7 @@ import MotorPattern from "@/components/MotorPattern";
 import AdvancedDetails from "@/components/AdvancedDetails";
 
 export default function Home() {
-  const { state, loading, feeding, triggerFeed } = useFeeder();
+  const { state, loading, feeding, currentTime, temperatureHistory, triggerFeed } = useFeeder();
 
   const lastFedTime = state.lastFedAt
     ? new Date(state.lastFedAt).toLocaleString("en-IN", {
@@ -57,7 +57,7 @@ export default function Home() {
           icon="⏰"
           label="Auto-feed Schedule"
           value="09:00 IST"
-          sub="Daily — skipped if manually fed"
+          sub="Manual feed skips auto-feed for the rest of that IST day"
         />
         <InfoCard
           icon="📡"
@@ -77,7 +77,11 @@ export default function Home() {
       {/* Motor Pattern Visualiser */}
       <MotorPattern active={state.status === "feeding"} />
 
-      <AdvancedDetails state={state} />
+      <AdvancedDetails
+        state={state}
+        currentTime={currentTime}
+        temperatureHistory={temperatureHistory}
+      />
 
       {/* Footer */}
       <p className="text-xs text-gray-600 mt-4">

@@ -3,10 +3,11 @@
 import { db } from "@/lib/firebase";
 import { ref, onValue, set, update } from "firebase/database";
 import { useEffect, useState, useCallback, useRef } from "react";
-import type { FeederState } from "@/types/feeder";
+import type { FeederState, TemperatureSample } from "@/types/feeder";
 
 const FEEDER_PATH = "/feeder";
 const HEARTBEAT_TIMEOUT_MS = 25000; // 25s timeout (ESP32 sends heartbeat every 10s)
+const MAX_TEMPERATURE_SAMPLES = 60; // Ten minutes at the 10-second heartbeat cadence
 
 export function useFeeder() {
   const [rawState, setRawState] = useState<FeederState>({
@@ -17,6 +18,8 @@ export function useFeeder() {
     espOnline: false,
     wifiRSSI: null,
     lastSeen: null,
+    chipTemperatureC: null,
+    chipTemperatureAt: null,
     lastBootAt: null,
     lastBootReason: null,
     lastPowerCutAt: null,
@@ -26,6 +29,7 @@ export function useFeeder() {
   });
   const [loading, setLoading] = useState(true);
   const [feeding, setFeeding] = useState(false);
+  const [temperatureHistory, setTemperatureHistory] = useState<TemperatureSample[]>([]);
   // Keep the initial render deterministic for prerendering. The current time is
   // initialized once the component mounts, then refreshed by the heartbeat timer.
   const [now, setNow] = useState<number>(0);
@@ -54,6 +58,8 @@ export function useFeeder() {
             espOnline: data.espOnline ?? false,
             wifiRSSI: data.wifiRSSI ?? null,
             lastSeen: data.lastSeen ?? null,
+            chipTemperatureC: data.chipTemperatureC ?? null,
+            chipTemperatureAt: data.chipTemperatureAt ?? null,
             lastBootAt: data.lastBootAt ?? null,
             lastBootReason: data.lastBootReason ?? null,
             lastPowerCutAt: data.lastPowerCutAt ?? null,
@@ -61,6 +67,24 @@ export function useFeeder() {
             lastWifiIssueAt: data.lastWifiIssueAt ?? null,
             lastWifiIssueReason: data.lastWifiIssueReason ?? null,
           });
+
+          const chipTemperatureC = data.chipTemperatureC;
+          const chipTemperatureAt = data.chipTemperatureAt;
+          if (
+            typeof chipTemperatureC === "number" &&
+            Number.isFinite(chipTemperatureC) &&
+            typeof chipTemperatureAt === "number" &&
+            Number.isFinite(chipTemperatureAt)
+          ) {
+            setTemperatureHistory((history) => {
+              if (history.at(-1)?.timestamp === chipTemperatureAt) return history;
+
+              return [
+                ...history,
+                { timestamp: chipTemperatureAt, celsius: chipTemperatureC },
+              ].slice(-MAX_TEMPERATURE_SAMPLES);
+            });
+          }
 
           // Reset the offline-synced flag when ESP comes back online
           if (data.espOnline) {
@@ -138,5 +162,12 @@ export function useFeeder() {
     }
   }, [feeding]);
 
-  return { state, loading, feeding, triggerFeed };
+  return {
+    state,
+    loading,
+    feeding,
+    currentTime: now,
+    temperatureHistory,
+    triggerFeed,
+  };
 }

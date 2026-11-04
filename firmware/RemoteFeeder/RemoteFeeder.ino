@@ -43,6 +43,7 @@
 #include <time.h>
 #include <Preferences.h>              // NVS for persistent storage
 #include <esp_system.h>               // reset-reason diagnostics
+#include <driver/temperature_sensor.h> // ESP32-S3 internal chip sensor
 
 // ---- Firebase ESP32 Client ----
 // Install: "Firebase ESP32 Client" by Mobizt (Library Manager)
@@ -131,6 +132,8 @@ bool bootMetadataSynced = false;
 bool wifiIssueOngoing   = false;
 bool wifiIssuePending   = false;
 String pendingWifiIssueReason;
+temperature_sensor_handle_t chipTemperatureSensor = NULL;
+bool chipTemperatureSensorReady = false;
 
 // NVS keys
 const char* NVS_NS           = "feeder";
@@ -159,6 +162,8 @@ void  syncBootMetadata();
 void  recordWifiIssue(const char* reason);
 void  syncPendingWifiIssue();
 void  markFirebaseUnavailable(const char* operation);
+void  initChipTemperatureSensor();
+bool  readChipTemperature(float* temperatureC);
 void  blinkLED(int times, int onMs, int offMs);
 time_t getNowTimestamp();
 String todayString();
@@ -181,6 +186,9 @@ void setup() {
 
   // --- NVS ---
   prefs.begin(NVS_NS, false);
+
+  // This measures the ESP32-S3 chip, not the surrounding room temperature.
+  initChipTemperatureSensor();
 
   // --- Connect WiFi ---
   connectWiFi();
@@ -350,6 +358,13 @@ bool initFirebase() {
   json.set("status", "idle");
   if (now > 100000) {
     json.set("lastSeen", (double)now * 1000.0);
+  }
+  float chipTemperatureC;
+  if (readChipTemperature(&chipTemperatureC)) {
+    json.set("chipTemperatureC", chipTemperatureC);
+    if (now > 100000) {
+      json.set("chipTemperatureAt", (double)now * 1000.0);
+    }
   }
   if (!Firebase.updateNode(fbData, "/feeder", json)) {
     markFirebaseUnavailable("initial status update");
@@ -524,6 +539,13 @@ void updateHeartbeat() {
   if (now > 100000) {
     json.set("lastSeen", (double)now * 1000.0);
   }
+  float chipTemperatureC;
+  if (readChipTemperature(&chipTemperatureC)) {
+    json.set("chipTemperatureC", chipTemperatureC);
+    if (now > 100000) {
+      json.set("chipTemperatureAt", (double)now * 1000.0);
+    }
+  }
   if (!Firebase.updateNode(fbData, "/feeder", json)) {
     markFirebaseUnavailable("send heartbeat");
   }
@@ -607,6 +629,38 @@ void manageWifiSleep() {
 // ============================================================
 //  Helpers
 // ============================================================
+
+void initChipTemperatureSensor() {
+  // The documented 20–100 °C range keeps reporting available if the chip runs
+  // hot. This is an internal silicon reading, not ambient air temperature.
+  temperature_sensor_config_t config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 100);
+
+  if (temperature_sensor_install(&config, &chipTemperatureSensor) != ESP_OK) {
+    Serial.println("[Temperature] Internal sensor unavailable.");
+    return;
+  }
+  if (temperature_sensor_enable(chipTemperatureSensor) != ESP_OK) {
+    Serial.println("[Temperature] Could not enable internal sensor.");
+    temperature_sensor_uninstall(chipTemperatureSensor);
+    chipTemperatureSensor = NULL;
+    return;
+  }
+
+  chipTemperatureSensorReady = true;
+  Serial.println("[Temperature] Internal chip sensor ready.");
+}
+
+bool readChipTemperature(float* temperatureC) {
+  if (!chipTemperatureSensorReady) return false;
+
+  if (temperature_sensor_get_celsius(chipTemperatureSensor, temperatureC) != ESP_OK) {
+    return false;
+  }
+
+  // Called with the same 10-second cadence as the Firebase heartbeat.
+  Serial.printf("[Temperature] ESP32 chip: %.1f C\n", *temperatureC);
+  return true;
+}
 
 const char* resetReasonName(esp_reset_reason_t reason) {
   switch (reason) {

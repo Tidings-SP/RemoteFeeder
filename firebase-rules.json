@@ -24,6 +24,12 @@
       "lastSeen": {
         ".validate": "newData.isNumber()"
       },
+      "chipTemperatureC": {
+        ".validate": "newData.isNumber()"
+      },
+      "chipTemperatureAt": {
+        ".validate": "newData.isNumber()"
+      },
       "lastBootAt": {
         ".validate": "newData.isNumber()"
       },
