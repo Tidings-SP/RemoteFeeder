@@ -21,14 +21,15 @@
  *    - Target time: 09:00 IST (UTC+5:30 = UTC+19800 s)
  *    - After any feed (manual or auto) lastFedAt is stored in
  *      NVS so it survives power cuts.
- *    - On boot: if lastFedAt is from a previous calendar day AND
- *      current time ≥ 09:00 → feed immediately (missed-feed recovery).
+ *    - Missed-feed recovery is configurable and disabled by default, so a
+ *      flash or boot later in the day cannot unexpectedly feed the fish.
  *    - During normal operation: feeds at 09:00 only if no feed
  *      has occurred today, and no manual trigger has fired today.
  *
- *  Motor pattern: ON 1.5 s → OFF 0.5 s  × 3 cycles
+ *  Motor pattern: ON 0.5 s → OFF 0.3 s  × 3 cycles
  *
- *  Power-saving: WiFi radio turned OFF between 20:00–08:00 IST
+ *  Power-saving: WiFi radio turned OFF between 20:00–08:00 and
+ *  12:00–16:30 IST.
  *    to reduce heat (ESP32-S3 on 5 V USB).
  *    Deep-sleep is NOT used because we need NTP time keeping and
  *    quick manual response; instead WiFi is simply disconnected.
@@ -72,6 +73,9 @@ const int   DAYLIGHT_SEC   = 0;
 // --- Auto-feed schedule ---
 const int AUTO_FEED_HOUR   = 9;   // 09:00 IST
 const int AUTO_FEED_MIN    = 0;
+// Keep this false while testing or after a fresh flash. When true, a missed
+// 09:00 feed is recovered immediately after a later boot/reconnect.
+const bool ENABLE_MISSED_FEED_RECOVERY = false;
 
 // --- WiFi sleep windows (IST, radio OFF) ---
 // Edit only these entries while testing. A window can cross midnight, such as
@@ -100,6 +104,7 @@ const unsigned long FIREBASE_POLL_MS  = 2000;    // how often we check trigger
 const unsigned long HEARTBEAT_MS      = 10000;   // online status heartbeat
 const unsigned long WIFI_CHECK_MS     = 30000;   // reconnect check
 const unsigned long NTP_RETRY_MS      = 300000;  // retry time sync every 5 min if needed
+const unsigned long FIREBASE_RETRY_MS = 30000;   // retry Firebase after an operation failure
 
 // ============================================================
 //  Globals
@@ -119,6 +124,7 @@ unsigned long lastFirebasePoll  = 0;
 unsigned long lastHeartbeat     = 0;
 unsigned long lastWifiCheck     = 0;
 unsigned long lastTimeSyncAttempt = 0;
+unsigned long lastFirebaseInitAttempt = 0;
 
 esp_reset_reason_t bootResetReason;
 bool bootMetadataSynced = false;
@@ -135,7 +141,7 @@ const char* NVS_FED_TODAY    = "fedToday";  // stores YYYY-MM-DD string
 //  Forward declarations
 // ============================================================
 void  connectWiFi();
-void  initFirebase();
+bool  initFirebase();
 void  syncTime();
 void  runFeedCycle(const char* source);
 void  updateFeedRecord(const char* source);
@@ -152,6 +158,7 @@ bool  isPowerRelatedReset(esp_reset_reason_t reason);
 void  syncBootMetadata();
 void  recordWifiIssue(const char* reason);
 void  syncPendingWifiIssue();
+void  markFirebaseUnavailable(const char* operation);
 void  blinkLED(int times, int onMs, int offMs);
 time_t getNowTimestamp();
 String todayString();
@@ -230,6 +237,17 @@ void loop() {
     now - lastTimeSyncAttempt >= NTP_RETRY_MS
   ) {
     syncTime();
+  }
+
+  // Firebase can fail while WiFi remains connected. Retry it independently
+  // instead of leaving dashboard control unavailable until WiFi drops.
+  if (
+    wifiConnected &&
+    !wifiSleepMode &&
+    !firebaseReady &&
+    now - lastFirebaseInitAttempt >= FIREBASE_RETRY_MS
+  ) {
+    initFirebase();
   }
 
   // 3. Firebase: poll manual trigger
@@ -313,7 +331,8 @@ void syncTime() {
 // ============================================================
 //  Firebase init
 // ============================================================
-void initFirebase() {
+bool initFirebase() {
+  lastFirebaseInitAttempt = millis();
   fbConfig.host              = FIREBASE_HOST;
   fbConfig.signer.tokens.legacy_token = FIREBASE_AUTH;
 
@@ -324,8 +343,6 @@ void initFirebase() {
   Firebase.setReadTimeout(fbData, 1000 * 60);
   Firebase.setwriteSizeLimit(fbData, "tiny");
 
-  firebaseReady = true;
-
   // Mark device online and send initial heartbeat with lastSeen timestamp
   time_t now = getNowTimestamp();
   FirebaseJson json;
@@ -334,22 +351,32 @@ void initFirebase() {
   if (now > 100000) {
     json.set("lastSeen", (double)now * 1000.0);
   }
-  Firebase.updateNode(fbData, "/feeder", json);
+  if (!Firebase.updateNode(fbData, "/feeder", json)) {
+    markFirebaseUnavailable("initial status update");
+    return false;
+  }
+
+  firebaseReady = true;
 
   syncBootMetadata();
   syncPendingWifiIssue();
 
+  if (!firebaseReady) return false;
+
   Serial.println("[Firebase] Initialized.");
+  return true;
 }
 
 // ============================================================
-//  Feed cycle  –  ON 1.5 s / OFF 0.5 s × 3
+//  Feed cycle  –  ON 0.5 s / OFF 0.3 s × 3
 // ============================================================
 void runFeedCycle(const char* source) {
   Serial.printf("[Feeder] Starting feed – source: %s\n", source);
 
   if (firebaseReady) {
-    Firebase.setString(fbData, "/feeder/status", "feeding");
+    if (!Firebase.setString(fbData, "/feeder/status", "feeding")) {
+      markFirebaseUnavailable("set feeding status");
+    }
   }
 
   // Persist this before applying motor power. A brownout during a cycle can
@@ -377,7 +404,9 @@ void runFeedCycle(const char* source) {
   updateFeedRecord(source);
 
   if (firebaseReady) {
-    Firebase.setString(fbData, "/feeder/status", "idle");
+    if (!Firebase.setString(fbData, "/feeder/status", "idle")) {
+      markFirebaseUnavailable("set idle status");
+    }
   }
 
   Serial.println("[Feeder] Feed complete.");
@@ -398,7 +427,9 @@ void updateFeedRecord(const char* source) {
     FirebaseJson json;
     json.set("lastFedAt",     (double)now * 1000.0);
     json.set("lastFedSource", source);
-    Firebase.updateNode(fbData, "/feeder", json);
+    if (!Firebase.updateNode(fbData, "/feeder", json)) {
+      markFirebaseUnavailable("update feed record");
+    }
   }
 }
 
@@ -440,16 +471,16 @@ void checkAutoFeed() {
   // Already fed today (NVS-persisted) — nothing to do
   if (hasBeenFedToday()) return;
 
-  // --- Boot-time missed-feed recovery ---
-  // Power cut before 09:00 and restored after 09:00:
-  //   hasBeenFedToday() is false, pastAutoTime is true → feed now
-  // Power cut after 09:00 (already fed):
-  //   hasBeenFedToday() returns true above → returns early, no double feed
+  bool atScheduledTime = h == AUTO_FEED_HOUR && m == AUTO_FEED_MIN;
   bool pastAutoTime = (h > AUTO_FEED_HOUR) ||
                       (h == AUTO_FEED_HOUR && m >= AUTO_FEED_MIN);
 
-  if (pastAutoTime) {
-    Serial.println("[AutoFeed] Feed due – triggering now.");
+  if (atScheduledTime || (ENABLE_MISSED_FEED_RECOVERY && pastAutoTime)) {
+    Serial.println(
+      atScheduledTime
+        ? "[AutoFeed] Scheduled feed due – triggering now."
+        : "[AutoFeed] Missed-feed recovery due – triggering now."
+    );
     runFeedCycle("auto");
     // runFeedCycle calls markFedToday(), so hasBeenFedToday()
     // will return true on the next iteration → no double fire.
@@ -460,7 +491,10 @@ void checkAutoFeed() {
 //  Manual trigger via Firebase
 // ============================================================
 void checkManualTrigger() {
-  if (!Firebase.getBool(fbData, "/feeder/trigger")) return;
+  if (!Firebase.getBool(fbData, "/feeder/trigger")) {
+    markFirebaseUnavailable("read manual trigger");
+    return;
+  }
 
   if (fbData.boolData()) {
     Serial.println("[Firebase] Manual trigger received!");
@@ -469,10 +503,7 @@ void checkManualTrigger() {
     // do not run the motor: retrying a still-true trigger is safer than a
     // possible duplicate feed after an uncertain write.
     if (!Firebase.setBool(fbData, "/feeder/trigger", false)) {
-      Serial.printf(
-        "[Firebase] Could not clear manual trigger: %s\n",
-        fbData.errorReason().c_str()
-      );
+      markFirebaseUnavailable("clear manual trigger");
       return;
     }
 
@@ -493,11 +524,13 @@ void updateHeartbeat() {
   if (now > 100000) {
     json.set("lastSeen", (double)now * 1000.0);
   }
-  Firebase.updateNode(fbData, "/feeder", json);
+  if (!Firebase.updateNode(fbData, "/feeder", json)) {
+    markFirebaseUnavailable("send heartbeat");
+  }
 }
 
 // ============================================================
-//  WiFi Sleep Window (20:00 – 08:00)
+//  WiFi Sleep Windows (20:00 – 08:00 and 12:00 – 16:30)
 //  Turning off WiFi radio significantly reduces heat/power.
 //  The ESP still runs, keeps NTP time, and can still auto-feed
 //  at 09:00 when radio is back on.
@@ -540,8 +573,12 @@ void manageWifiSleep() {
     Serial.println("[WiFi] Entering sleep window – radio OFF.");
 
     if (firebaseReady) {
-      Firebase.setBool(fbData,   "/feeder/espOnline", false);
-      Firebase.setString(fbData, "/feeder/status",    "offline");
+      if (!Firebase.setBool(fbData, "/feeder/espOnline", false)) {
+        markFirebaseUnavailable("set offline presence");
+      }
+      if (!Firebase.setString(fbData, "/feeder/status", "offline")) {
+        markFirebaseUnavailable("set offline status");
+      }
     }
 
     WiFi.disconnect(true);
@@ -607,7 +644,11 @@ void syncBootMetadata() {
     json.set("lastPowerCutReason", resetReasonName(bootResetReason));
   }
 
-  bootMetadataSynced = Firebase.updateNode(fbData, "/feeder", json);
+  if (Firebase.updateNode(fbData, "/feeder", json)) {
+    bootMetadataSynced = true;
+  } else {
+    markFirebaseUnavailable("sync boot metadata");
+  }
 }
 
 void recordWifiIssue(const char* reason) {
@@ -630,7 +671,18 @@ void syncPendingWifiIssue() {
   json.set("lastWifiIssueReason", pendingWifiIssueReason);
   if (Firebase.updateNode(fbData, "/feeder", json)) {
     wifiIssuePending = false;
+  } else {
+    markFirebaseUnavailable("sync WiFi issue");
   }
+}
+
+void markFirebaseUnavailable(const char* operation) {
+  Serial.printf(
+    "[Firebase] %s failed: %s. Will retry.\n",
+    operation,
+    fbData.errorReason().c_str()
+  );
+  firebaseReady = false;
 }
 
 // NOTE: Named getNowTimestamp() to avoid collision with the
