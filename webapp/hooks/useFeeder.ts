@@ -39,6 +39,11 @@ export function useFeeder() {
     rawStateRef.current = rawState;
   }, [rawState]);
 
+  // React state updates are asynchronous. This ref closes the small window in
+  // which two very fast taps could otherwise send two Firebase writes.
+  const feedCommandLockedRef = useRef(false);
+  const feedCycleStartedRef = useRef(false);
+
   // Track whether we've already written offline to DB to avoid
   // spamming Firebase with identical writes every 2 seconds
   const offlineSyncedRef = useRef(false);
@@ -91,8 +96,21 @@ export function useFeeder() {
             offlineSyncedRef.current = false;
           }
 
-          // Clear local feeding state once ESP confirms idle
-          if (data.status === "idle" || data.status === "offline") {
+          if (data.status === "feeding") {
+            feedCycleStartedRef.current = true;
+            setFeeding(true);
+          }
+
+          // Keep the command lock while the trigger is queued and until a
+          // started cycle returns to idle. This prevents a second click from
+          // becoming another feed request between Firebase updates.
+          if (
+            (data.status === "idle" || data.status === "offline") &&
+            feedCycleStartedRef.current &&
+            !data.trigger
+          ) {
+            feedCommandLockedRef.current = false;
+            feedCycleStartedRef.current = false;
             setFeeding(false);
           }
         }
@@ -101,6 +119,8 @@ export function useFeeder() {
       () => {
         // Permission and listener errors otherwise leave the UI on
         // "Connecting…" forever. The default state safely renders offline.
+        feedCommandLockedRef.current = false;
+        feedCycleStartedRef.current = false;
         setFeeding(false);
         setLoading(false);
       },
@@ -152,12 +172,16 @@ export function useFeeder() {
   };
 
   const triggerFeed = useCallback(async () => {
-    if (feeding) return;
+    if (feeding || feedCommandLockedRef.current) return;
+
+    feedCommandLockedRef.current = true;
+    feedCycleStartedRef.current = false;
     setFeeding(true);
     try {
       await set(ref(db, `${FEEDER_PATH}/trigger`), true);
     } catch (err) {
       console.error("Failed to trigger feed:", err);
+      feedCommandLockedRef.current = false;
       setFeeding(false);
     }
   }, [feeding]);

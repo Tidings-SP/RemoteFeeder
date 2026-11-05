@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { TemperatureSample } from "@/types/feeder";
 
 type Props = {
@@ -21,6 +22,7 @@ function formatTime(timestamp: number) {
 }
 
 export default function TemperatureChart({ samples, online }: Props) {
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const plotWidth = WIDTH - PADDING.left - PADDING.right;
   const plotHeight = HEIGHT - PADDING.top - PADDING.bottom;
   const temperatures = samples.map((sample) => sample.celsius);
@@ -37,6 +39,14 @@ export default function TemperatureChart({ samples, online }: Props) {
   const points = samples.map(pointAt);
   const line = points.map((point) => `${point.x},${point.y}`).join(" ");
   const latest = samples.at(-1);
+  const hoveredPoint = hoveredIndex === null ? null : points[hoveredIndex];
+  const hoveredSample = hoveredIndex === null ? null : samples[hoveredIndex];
+  const tooltipX = hoveredPoint
+    ? Math.min(hoveredPoint.x + 8, WIDTH - 88)
+    : 0;
+  const tooltipY = hoveredPoint
+    ? Math.max(hoveredPoint.y - 30, PADDING.top)
+    : 0;
 
   return (
     <section className="w-full rounded-xl border border-gray-800 bg-gray-950/60 p-3">
@@ -79,8 +89,36 @@ export default function TemperatureChart({ samples, online }: Props) {
           })}
           <polyline fill="none" stroke="#22d3ee" strokeWidth="2.5" points={line} strokeLinejoin="round" strokeLinecap="round" />
           {points.map((point, index) => (
-            <circle key={samples[index].timestamp} cx={point.x} cy={point.y} r="2.5" fill="#67e8f9" />
+            <g
+              key={samples[index].timestamp}
+              tabIndex={0}
+              role="img"
+              aria-label={`${samples[index].celsius.toFixed(1)} degrees Celsius at ${formatTime(samples[index].timestamp)}`}
+              onPointerEnter={() => setHoveredIndex(index)}
+              onPointerLeave={() => setHoveredIndex(null)}
+              onFocus={() => setHoveredIndex(index)}
+              onBlur={() => setHoveredIndex(null)}
+            >
+              <circle cx={point.x} cy={point.y} r="8" fill="transparent" />
+              <circle
+                cx={point.x}
+                cy={point.y}
+                r={hoveredIndex === index ? "4" : "2.5"}
+                fill={hoveredIndex === index ? "#ffffff" : "#67e8f9"}
+              />
+            </g>
           ))}
+          {hoveredPoint && hoveredSample && (
+            <g pointerEvents="none">
+              <rect x={tooltipX} y={tooltipY} width="82" height="25" rx="4" fill="#111827" stroke="#22d3ee" />
+              <text x={tooltipX + 6} y={tooltipY + 10} fill="#cffafe" fontSize="9">
+                {hoveredSample.celsius.toFixed(1)} °C
+              </text>
+              <text x={tooltipX + 6} y={tooltipY + 20} fill="#9ca3af" fontSize="8">
+                {formatTime(hoveredSample.timestamp)} IST
+              </text>
+            </g>
+          )}
           <text x={PADDING.left} y={HEIGHT - 8} fill="#9ca3af" fontSize="9">
             {formatTime(samples[0].timestamp)}
           </text>

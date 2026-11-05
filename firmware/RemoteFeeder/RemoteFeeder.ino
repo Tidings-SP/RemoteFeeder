@@ -96,7 +96,7 @@ const size_t WIFI_SLEEP_WINDOW_COUNT =
   sizeof(WIFI_SLEEP_WINDOWS) / sizeof(WIFI_SLEEP_WINDOWS[0]);
 
 // --- Motor pattern ---
-const int FEED_CYCLES       = 3;
+const int FEED_CYCLES       = 2;
 const int MOTOR_ON_MS       = 500;
 const int MOTOR_OFF_MS      = 300;
 
